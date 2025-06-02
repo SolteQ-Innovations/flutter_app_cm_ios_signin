@@ -16,7 +16,7 @@ ios-workflow:
     app_store_connect: SolomonAPIKey
   scripts:
     - name: Set up code signing settings on Xcode project
-      script: xcode-project use-profiles
+      script: xcode-project use-profiles --archive-method=app-store
     - name: Get Flutter packages
       script: flutter pub get
     - name: Install pods

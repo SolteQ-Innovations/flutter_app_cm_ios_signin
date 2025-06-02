@@ -3,7 +3,7 @@
     "activeCommit": 0,
     "commits": [
         {
-            "activePatchIndex": 2,
+            "activePatchIndex": 3,
             "patches": [
                 {
                     "date": 1748865951773,
@@ -16,6 +16,10 @@
                 {
                     "date": 1748866043241,
                     "content": "Index: \n===================================================================\n--- \n+++ \n@@ -20,10 +20,9 @@\n     - name: Get Flutter packages\n       script: flutter pub get\n     - name: Install pods\n       script: find . -name \"Podfile\" -execdir pod install \\;\n-\n-    - name: Run Shorebird Release\n+    - name: Build iOS release app\n       # script: |\n       #   /Users/builder/.shorebird/bin/shorebird release android \\\n       #     --flavor production \\\n       #     --flutter-version \"$FLUTTER_VERSION\" \\\n"
+                },
+                {
+                    "date": 1748883893257,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -15,9 +15,9 @@\n   integrations:\n     app_store_connect: SolomonAPIKey\n   scripts:\n     - name: Set up code signing settings on Xcode project\n-      script: xcode-project use-profiles\n+      script: xcode-project use-profiles --archive-method=app-store\n     - name: Get Flutter packages\n       script: flutter pub get\n     - name: Install pods\n       script: find . -name \"Podfile\" -execdir pod install \\;\n"
                 }
             ],
             "date": 1748865951773,
