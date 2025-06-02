@@ -1,0 +1,26 @@
+{
+    "sourceFile": "codemagic.yaml",
+    "activeCommit": 0,
+    "commits": [
+        {
+            "activePatchIndex": 2,
+            "patches": [
+                {
+                    "date": 1748865951773,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n"
+                },
+                {
+                    "date": 1748865985253,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -2,22 +2,14 @@\n ios-workflow:\n   name: iOS Workflow\n   instance_type: mac_mini_m2\n   max_build_duration: 120\n-  triggering:\n-    events:\n-      - push\n-    branch_patterns:\n-      - pattern: \"dev\"\n-        include: true\n-    cancel_previous_builds: false\n   environment:\n     flutter: stable\n     xcode: latest\n     cocoapods: default\n     groups:\n-      - shorebird_credentials\n-        # - appstore_credentials\n+        - appstore_credentials\n     ios_signing:\n       distribution_type: app_store\n       bundle_identifier: com.solo.flutterCodemagicApp\n   integrations:\n"
+                },
+                {
+                    "date": 1748866043241,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -20,10 +20,9 @@\n     - name: Get Flutter packages\n       script: flutter pub get\n     - name: Install pods\n       script: find . -name \"Podfile\" -execdir pod install \\;\n-\n-    - name: Run Shorebird Release\n+    - name: Build iOS release app\n       # script: |\n       #   /Users/builder/.shorebird/bin/shorebird release android \\\n       #     --flavor production \\\n       #     --flutter-version \"$FLUTTER_VERSION\" \\\n"
+                }
+            ],
+            "date": 1748865951773,
+            "name": "Commit-0",
+            "content": "workflows:\nios-workflow:\n  name: iOS Workflow\n  instance_type: mac_mini_m2\n  max_build_duration: 120\n  triggering:\n    events:\n      - push\n    branch_patterns:\n      - pattern: \"dev\"\n        include: true\n    cancel_previous_builds: false\n  environment:\n    flutter: stable\n    xcode: latest\n    cocoapods: default\n    groups:\n      - shorebird_credentials\n        # - appstore_credentials\n    ios_signing:\n      distribution_type: app_store\n      bundle_identifier: com.solo.flutterCodemagicApp\n  integrations:\n    app_store_connect: SolomonAPIKey\n  scripts:\n    - name: Set up code signing settings on Xcode project\n      script: xcode-project use-profiles\n    - name: Get Flutter packages\n      script: flutter pub get\n    - name: Install pods\n      script: find . -name \"Podfile\" -execdir pod install \\;\n   \n    - name: Run Shorebird Release\n      # script: |\n      #   /Users/builder/.shorebird/bin/shorebird release android \\\n      #     --flavor production \\\n      #     --flutter-version \"$FLUTTER_VERSION\" \\\n      script: |\n        flutter build ipa --release \\\n          --build-name=1.0.0 \\\n          --build-number=$(($(app-store-connect get-latest-testflight-build-number \"$APP_ID\") + 1)) \\\n          --export-options-plist=\"/Users/builder/export_options.plist\"\n  artifacts:\n    - build/ios/ipa/*.ipa\n    - /tmp/xcodebuild_logs/*.log\n    - flutter_drive.log\n  # artifacts:\n  #   - build/ios/iphonesimulator/Runner.app\n  publishing:\n    app_store_connect:\n      auth: integration\n      # submit_to_testflight: true\n      # submit_to_app_store: true\n      # release_type: AFTER_APPROVAL\n"
+        }
+    ]
+}
