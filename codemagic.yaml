@@ -1,45 +1,45 @@
 workflows:
-ios-workflow:
-  name: iOS Workflow
-  instance_type: mac_mini_m2
-  max_build_duration: 120
-  environment:
-    flutter: stable
-    xcode: latest
-    cocoapods: default
-    groups:
-      - appstore_credentials
-    ios_signing:
-      distribution_type: app_store
-      bundle_identifier: com.solo.flutterCodemagicApp
-  integrations:
-    app_store_connect: SolomonAPIKey
-  scripts:
-    - name: Set up code signing settings on Xcode project
-      script: xcode-project use-profiles --archive-method=app-store
-    - name: Get Flutter packages
-      script: flutter pub get
-    - name: Install pods
-      script: find . -name "Podfile" -execdir pod install \;
-    - name: Build iOS release app
-      # script: |
-      #   /Users/builder/.shorebird/bin/shorebird release android \
-      #     --flavor production \
-      #     --flutter-version "$FLUTTER_VERSION" \
-      script: |
-        flutter build ipa --release \
-          --build-name=1.0.0 \
-          --build-number=$(($(app-store-connect get-latest-testflight-build-number "$APP_ID") + 1)) \
-          --export-options-plist="/Users/builder/export_options.plist"
-  artifacts:
-    - build/ios/ipa/*.ipa
-    - /tmp/xcodebuild_logs/*.log
-    - flutter_drive.log
-  # artifacts:
-  #   - build/ios/iphonesimulator/Runner.app
-  publishing:
-    app_store_connect:
-      auth: integration
-      # submit_to_testflight: true
-      # submit_to_app_store: true
-      # release_type: AFTER_APPROVAL
+  ios-workflow:
+    name: iOS Workflow
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      groups:
+        - appstore_credentials
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.solo.flutterCodemagicApp
+    integrations:
+      app_store_connect: SolomonAPIKey
+    scripts:
+      - name: Set up code signing settings on Xcode project
+        script: xcode-project use-profiles --archive-method=app-store
+      - name: Get Flutter packages
+        script: flutter pub get
+      - name: Install pods
+        script: find . -name "Podfile" -execdir pod install \;
+      - name: Build iOS release app
+        # script: |
+        #   /Users/builder/.shorebird/bin/shorebird release android \
+        #     --flavor production \
+        #     --flutter-version "$FLUTTER_VERSION" \
+        script: |
+          flutter build ipa --release \
+            --build-name=1.0.0 \
+            --build-number=$(($(app-store-connect get-latest-testflight-build-number "$APP_ID") + 1)) \
+            --export-options-plist="/Users/builder/export_options.plist"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - flutter_drive.log
+    # artifacts:
+    #   - build/ios/iphonesimulator/Runner.app
+    publishing:
+      app_store_connect:
+        auth: integration
+        # submit_to_testflight: true
+        # submit_to_app_store: true
+        # release_type: AFTER_APPROVAL
