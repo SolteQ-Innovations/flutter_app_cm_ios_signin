@@ -1,0 +1,1341 @@
+definitions:
+  environment:
+    groups:
+      - izydesk
+
+  scripts:
+    - &print_env
+      name: PRINT ENV
+      script: printenv
+
+    - &flutter_doctor
+      name: Check Flutter setup
+      script: flutter doctor
+
+    - &firebase_install
+      name: Install Firebase CLI
+      script: |
+        #!/bin/bash
+
+        # Vérifier si Firebase CLI est déjà installé
+        if command -v firebase > /dev/null 2>&1; then
+            echo "Firebase CLI est déjà installé."
+        else
+            # Installer Firebase CLI
+            echo "Firebase CLI n'est pas installé. Installation en cours..."
+            npm install -g firebase-tools
+            if [[ $? -ne 0 ]]; then
+                echo "Error installing Firebase CLI"
+                exit 1
+            fi
+            echo "Firebase CLI installed"
+        fi
+
+    - &firebase_auth
+      name: Check Firebase authentication
+      script: |
+        #!/bin/bash
+
+        echo $GOOGLE_APPLICATION_CREDENTIALS >> $GOOGLE_APPLICATION_CREDENTIALS_FILE_PATH
+
+        gcloud auth activate-service-account --key-file=$GOOGLE_APPLICATION_CREDENTIALS_FILE_PATH
+
+        echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS_FILE_PATH" >> tempenv.sh
+        source tempenv.sh
+
+        # Check if Firebase token is valid
+        firebase projects:list
+        if [[ $? -ne 0 ]]; then
+            echo "Firebase auth is invalid or has expired. Please fix."
+            exit 1
+        fi
+        echo "Firebase auth is valid"
+
+    - &firebase_project_creation
+      name: Create, if non-existent, the Firebase project
+      script: |
+        #!/bin/bash
+
+        source tempenv.sh
+
+        # Slugify the company name
+        customname_slugify=$(echo "$DATA_appDisplayName" | sed -e 's/[^[:alnum:]]/-/g' | tr -s '-' | tr A-Z a-z)
+
+        # Calculate the maximum possible length for customuid
+        max_customuid_length=$((29 - 11 - ${#customname_slugify}))
+
+        # Extract the last N characters of customuid
+        customuid=$(echo "$DATA_saasCompanyUuid" | tail -c $max_customuid_length | tr A-Z a-z)
+
+        # Generate project id
+        FIREBASE_PROJECT_NAME="izy-ter-cma-${customname_slugify}-${customuid}"
+
+        # Vérifier si le projet Firebase existe
+        PROJECT_EXISTS=$(firebase projects:list | grep -c $FIREBASE_PROJECT_NAME)
+        if [[ $PROJECT_EXISTS -eq 0 ]]; then
+            # Créer un projet Firebase
+            RESULT=$(firebase projects:create $FIREBASE_PROJECT_NAME --display-name "$DATA_appDisplayName" --organization $GCLOUD_ORGANIZATION_ID --debug)
+            SUCCESS=$(echo $RESULT | grep -c "Your Firebase project is ready!")
+            if [[ $SUCCESS -ne 1 ]]; then
+                echo "Error creating Firebase project: $FIREBASE_PROJECT_NAME"
+                echo "output: $RESULT"
+
+                # Does it already exists?
+                PROJECT_EXISTS=$(firebase projects:list | grep -c $FIREBASE_PROJECT_NAME)
+                if [[ $PROJECT_EXISTS -eq 0 ]]; then
+                  echo "Unable to fetch or create firebase project $FIREBASE_PROJECT_NAME. exiting.."
+                  exit 1
+                else
+                  echo "Firebase project fetched & obtained on 2nd try: $FIREBASE_PROJECT_NAME"
+                fi
+            else
+              echo "Firebase project created: $FIREBASE_PROJECT_NAME"
+            fi
+        else
+            echo "Firebase project already exists: $FIREBASE_PROJECT_NAME"
+        fi
+
+        echo "FIREBASE_PROJECT_NAME=$FIREBASE_PROJECT_NAME" >> tempenv.sh
+
+    - &firebase_messaging_setup
+      name: Enable and setup Firebase Cloud Messaging
+      script: |
+        #!/bin/bash
+
+        source tempenv.sh
+
+        if [[ -z "$FIREBASE_PROJECT_NAME" ]]; then
+            echo "Error: FIREBASE_PROJECT_NAME is not set after sourcing tempenv.sh"
+            exit 1
+        else
+            echo "Using Firebase project: $FIREBASE_PROJECT_NAME"
+        fi
+
+        # Check if it's already setup.
+        payload='{
+          "companyUuid": "'"$DATA_saasCompanyUuid"'"
+        }'
+        echo "Payload envoyé : $payload"
+        statusCode=$(curl -s -o /dev/null -w "%{http_code}" --request POST \
+          --url https://app-staging.izydesk-tertiaire.fr/get-firebase-credentials-customer-mobile-app-by-company-uuid \
+          --header 'content-type: application/json' \
+          --data "$payload"
+          )
+        if [[ $statusCode == 200 ]]; then
+          echo "FCM already setup for this company, next step..."
+          exit 0
+        elif [[ $statusCode == 404 ]]; then
+          echo "Setting up Firebase Cloud Messaging..."
+          statusCode=0
+        else
+          echo "Error fetching Firebase service account key from SaaS backend, exiting..."
+          echo "statusCode: $statusCode"
+          exit 1
+        fi
+
+        # Select the Firebase project
+        gcloud config set project $FIREBASE_PROJECT_NAME
+        if [[ $? -ne 0 ]]; then
+            echo "Error selecting Firebase project: $FIREBASE_PROJECT_NAME"
+            exit 1
+        fi
+
+        # Enable Firebase Cloud Messaging
+        gcloud services enable firebase.googleapis.com
+        if [[ $? -ne 0 ]]; then
+            echo "Error enabling Firebase Cloud Messaging"
+            exit 1
+        fi
+
+        SA_NAME="fcm-sa-sender"
+
+        # Check if a service account already exists
+        SERVICE_ACCOUNT_EXISTS=$(gcloud iam service-accounts list --project $FIREBASE_PROJECT_NAME | grep -c $SA_NAME)
+        if [[ $SERVICE_ACCOUNT_EXISTS -eq 0 ]]; then
+            echo "Service account $SA_NAME does not exist. Creating..."
+
+          # Create a service account for Firebase Cloud Messaging
+          gcloud iam service-accounts create $SA_NAME --display-name "Firebase Admin" --project $FIREBASE_PROJECT_NAME
+
+          # Add the service account to the Firebase Admin role
+          gcloud projects add-iam-policy-binding $FIREBASE_PROJECT_NAME \
+            --member serviceAccount:$SA_NAME@$FIREBASE_PROJECT_NAME.iam.gserviceaccount.com \
+            --role roles/firebase.admin
+
+          # Add the service account to the Firebase Cloud Messaging Admin role
+          gcloud projects add-iam-policy-binding $FIREBASE_PROJECT_NAME \
+            --member serviceAccount:$SA_NAME@$FIREBASE_PROJECT_NAME.iam.gserviceaccount.com \
+            --role roles/firebasecloudmessaging.admin
+        fi
+
+        # Create a service account key
+        gcloud iam service-accounts keys create $SA_NAME-key.json \
+          --iam-account $SA_NAME@$FIREBASE_PROJECT_NAME.iam.gserviceaccount.com \
+          --project $FIREBASE_PROJECT_NAME
+        if [[ $? -ne 0 ]]; then
+            echo "Error creating service account key"
+            exit 1
+        else
+            echo "Service account key created: $SA_NAME-key.json"
+        fi
+
+        # Upload the service account key to SaaS backend
+
+        payload='{
+          "companyUuid": "'"$DATA_saasCompanyUuid"'",
+          "credentials": '"$(jq -c . < $SA_NAME-key.json)"'
+        }'
+        echo "Payload envoyé : $payload"
+
+        statusCode=$(curl -s -o /dev/null -w "%{http_code}" --request POST \
+          --url https://app-staging.izydesk-tertiaire.fr/set-firebase-credentials-customer-mobile-app \
+          --header "content-type: application/json" \
+          --data "$payload"
+        )
+        if [[ $statusCode -ne 200 ]]; then
+            echo "Error uploading Firebase service account key to SaaS backend"
+            echo "statusCode: $statusCode // companyUuid: $DATA_saasCompanyUuid // $payload"
+            exit 1
+        fi
+
+    - &enable_flutterfire
+      name: Enable/Install FlutterFire
+      script: |
+        #!/bin/bash
+
+        dart pub global activate flutterfire_cli
+        if [[ $? -ne 0 ]]; then
+          echo "Error activating flutterfire"
+          exit 1
+        fi
+
+        echo "PATH=$PATH:$HOME/.pub-cache/bin" >> tempenv.sh
+
+    - &generate_firebase_options
+      name: Generate firebase_options.dart with FlutterFire
+      script: |
+        #!/bin/bash
+
+        source tempenv.sh
+
+        if [[ -z "$PLATFORM" ]]; then
+          echo "PLATFORM is not set. Default to android,ios"
+          PLATFORM="android,ios"
+        fi
+
+        if [[ "$PLATFORM" == "android" ]]; then
+          flutterfire configure --project $FIREBASE_PROJECT_NAME --platforms=android --android-package-name=$DATA_packageName --overwrite-firebase-options
+          if [[ $? -ne 0 ]]; then
+            echo "Error running flutterfire configure"
+            exit 1
+          fi
+        fi
+
+        if [[ "$PLATFORM" == "ios" ]]; then
+          flutterfire configure --project $FIREBASE_PROJECT_NAME --platforms=ios --ios-bundle-id=$DATA_packageName --overwrite-firebase-options
+          if [[ $? -ne 0 ]]; then
+            echo "Error running flutterfire configure"
+            exit 1
+          fi
+        fi
+
+        if [[ "$PLATFORM" == "android,ios" ]]; then
+          flutterfire configure --project $FIREBASE_PROJECT_NAME --platforms=android,ios  --android-package-name=$DATA_packageName --ios-bundle-id=$DATA_packageName --overwrite-firebase-options
+          if [[ $? -ne 0 ]]; then
+            echo "Error running flutterfire configure"
+            exit 1
+          fi
+        fi
+
+        echo "lib/firebase_options.dart fileContent"
+        echo "---"
+        echo "$(<lib/firebase_options.dart)"
+        echo "---"
+
+    - &generate_env_file
+      name: Generate assets/env/.env(.prod).local files
+      script: |
+        #!/bin/bash
+
+        source tempenv.sh
+
+        # Génére le fichier .env.prod.local
+        fileContent="COMPANY_UUID=$DATA_saasCompanyUuid\nCOMPANY_TYPE=$DATA_saasCompanyType\nCOMPANY_NAME=$DATA_saasCompanyName\nFIREBASE_APP_PROJECT_NAME=$FIREBASE_PROJECT_NAME"
+        echo -e $fileContent > assets/env/.env.prod.local
+        if [[ $? -ne 0 ]]; then
+            echo "Error generating assets/env/.env.prod.local file"
+            exit 1
+        fi
+
+        # Génére le fichier .env.local
+        fileContent="ENVIRONMENT=PROD"
+        echo -e $fileContent > assets/env/.env.local
+        if [[ $? -ne 0 ]]; then
+            echo "Error generating assets/env/.env.local file"
+            exit 1
+        fi
+
+    - &move_images_assets
+      name: Move images assets from company subfolder to assets/images/company
+      script: |
+        #!/bin/bash
+
+        companyId=$DATA_saasCompanyUuid
+
+        echo "Moving assets from assets/companies/$companyId ..."
+
+        # Déplacer les images de assets/companies
+        mv assets/companies/$companyId/* assets/images/company
+        if [[ $? -ne 0 ]]; then
+            echo "Error moving assets from assets/companies/$companyId"
+            exit 1
+        fi
+        echo "Successfully moved assets from assets/companies/$companyId"
+
+    - &clean_up
+      name: Clean up
+      script: |
+        #!/bin/bash
+
+        flutter clean
+        if [[ $? -ne 0 ]]; then
+            echo "Error cleaning Flutter project"
+            exit 1
+        fi
+
+    - &build_launcher_icons
+      name: Build launcher icons
+      script: |
+        #!/bin/bash
+
+        # Générer les icônes de lancement
+        dart run flutter_launcher_icons
+        if [[ $? -ne 0 ]]; then
+            echo "Error generating launcher icons"
+            exit 1
+        fi
+
+    - &install_flutter_dependencies
+      name: Install Flutter dependencies
+      script: |
+        #!/bin/bash
+
+        # Installer les dépendances Flutter
+        flutter pub get
+        if [[ $? -ne 0 ]]; then
+            echo "Error installing Flutter dependencies"
+            exit 1
+        fi  
+
+        #flutter packages pub get
+        #if [[ $? -ne 0 ]]; then
+            #echo "Error installing Flutter dependencies"
+            #exit 1
+        #fi
+
+        # Générer les fichiers nécessaires
+        flutter pub run build_runner build --delete-conflicting-outputs
+        if [[ $? -ne 0 ]]; then
+            echo "Error generating files with build_runner"
+            exit 1
+        fi
+
+        OUTPUT=$(flutter gen-l10n)
+        if [[ $? -ne 0 ]]; then
+            echo "Error w/ flutter gen"
+            echo "output: $OUTPUT"
+            exit 2
+        fi
+
+workflows:
+  generate_builds:
+    name: Generate Builds
+    instance_type: linux_x2
+
+    triggering:
+      events:
+        - tag
+      branch_patterns:
+        - pattern: "main"
+          include: true
+          source: true
+      tag_patterns:
+        - pattern: "*"
+          include: true
+
+    environment:
+      groups:
+        - izydesk
+
+    scripts:
+      - name: Read izydesk_apps.json and trigger builds
+        script: |
+          #!/bin/bash
+
+          # Lire le fichier JSON et extraire la liste des applications
+          APPS=$(jq -c '.apps[]' izydesk_apps.json)
+
+          if [[ $? -ne 0 ]]; then
+              echo "Error reading JSON from izydesk_apps.json"
+              exit 1
+          fi
+
+          # Compter le nombre d'applications
+          APP_COUNT=$(echo "$APPS" | wc -l)
+          echo "Found $APP_COUNT apps in configuration."
+
+          # Boucle pour chaque application
+          echo "$APPS" | while IFS= read -r app; do
+            saasCompanyName=$(echo "$app" | jq -r '.saasCompanyName')
+            saasCompanyUuid=$(echo "$app" | jq -r '.saasCompanyUuid')
+            saasCompanyType=$(echo "$app" | jq -r '.saasCompanyType')
+            packageNameAndroid=$(echo "$app" | jq -r '.packageName')
+            packageNameIos=$(echo "$app" | jq -r '.packageName')
+            appDisplayName=$(echo "$app" | jq -r '.appDisplayName')
+            appStoreId=$(echo "$app" | jq -r '.appStoreAppId')
+
+            # Vérification si la clé "overrideIosPackageName" est présente et non nulle
+            overrideIosPackageName=$(echo "$app" | jq -r '.overrideIosPackageName // empty')
+            if [ -n "$overrideIosPackageName" ]; then
+                packageNameIos="$overrideIosPackageName"
+            fi
+
+            #~ Check that all required fields are present
+            if [[ -z "$saasCompanyName" || -z "$saasCompanyUuid" || -z "$saasCompanyType" || -z "$packageNameAndroid" || -z "$packageNameIos" || -z "$appDisplayName" || -z "$appStoreId" ]]; then
+              echo "APP: $app"
+              echo "Missing required fields for app. Skipping..."
+              continue
+            fi
+
+
+            echo "Triggering ANDROID build for $saasCompanyName..."
+
+            # Déclencher le workflow Android
+            curl -X POST "https://api.codemagic.io/builds" \
+            -H "Content-Type: application/json" \
+            -H "x-auth-token: $CM_API_TOKEN" \
+            -d '{
+              "appId": "'"$COD_MAGIC_APP_ID"'",
+              "workflowId": "build_android",
+              "branch": "main",
+              "environment": {
+                "variables": {
+                  "DATA_saasCompanyName": "'"$saasCompanyName"'",
+                  "DATA_saasCompanyUuid": "'"$saasCompanyUuid"'",
+                  "DATA_saasCompanyType": "'"$saasCompanyType"'",
+                  "DATA_packageName": "'"$packageNameAndroid"'",
+                  "DATA_appDisplayName": "'"$appDisplayName"'"
+                }
+              }
+            }'
+
+            echo "Triggering iOS build for $saasCompanyName..."
+
+            # Déclencher le workflow iOS
+            curl -X POST "https://api.codemagic.io/builds" \
+            -H "Content-Type: application/json" \
+            -H "x-auth-token: $CM_API_TOKEN" \
+            -d '{
+              "appId": "'"$COD_MAGIC_APP_ID"'",
+              "workflowId": "build_ios",
+              "branch": "main",
+              "inputs": {
+                "bundleIdentifier": "'"$packageNameIos"'"
+              },
+              "environment": {
+                "variables": {
+                  "DATA_saasCompanyName": "'"$saasCompanyName"'",
+                  "DATA_saasCompanyUuid": "'"$saasCompanyUuid"'",
+                  "DATA_saasCompanyType": "'"$saasCompanyType"'",
+                  "DATA_packageName": "'"$packageNameIos"'",
+                  "DATA_appDisplayName": "'"$appDisplayName"'",
+                  "DATA_appStoreId": "'"$appStoreId"'"
+                }
+              }
+            }'
+
+          done
+
+  build_android:
+    name: Triggered Android Build
+    instance_type: linux_x2
+
+    environment:
+      groups:
+        - izydesk
+
+      flutter: 3.27.3
+
+    scripts:
+      - name: Set platform in tempenv
+        script: echo "PLATFORM=android" >> tempenv.sh
+
+      - name: Google Play Version comparaison
+        script: |
+          # GPLAY_VERSION=$(google-play get-latest-version-code --package-name "$PACKAGE_NAME")
+          GPLAY_BUILD_NUMBER=$(google-play get-latest-build-number --package-name "$DATA_packageName" --tracks="production")
+
+          PUBSPEC_VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d '+' -f 1)
+          PUBSPEC_BUILD_NUMBER=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d '+' -f 2)
+
+          if [[ $PUBSPEC_BUILD_NUMBER == $GPLAY_BUILD_NUMBER ]]; then
+              echo "The version and build number in pubspec.yaml are the same as the latest on Google Play."
+              echo "No need to build and release."
+              exit 2
+          elif [[ $PUBSPEC_BUILD_NUMBER < $GPLAY_BUILD_NUMBER ]]; then
+              echo "The build number in pubspec.yaml is less than the latest on Google Play."
+              echo "Cannot release an older build. Canceling the process."
+              exit 2
+          fi
+
+          echo "PUBSPEC_VERSION=$PUBSPEC_VERSION" >> tempenv.sh
+          echo "PUBSPEC_BUILD_NUMBER=$PUBSPEC_BUILD_NUMBER" >> tempenv.sh
+
+
+          echo "The build number in pubspec.yaml is greater than the latest on Google Play."
+          echo "Proceeding with configuration, build and deployment process."
+
+      - *flutter_doctor
+
+      - *firebase_install
+
+      - *firebase_auth
+
+      - name: Replace Android package name
+        script: |
+          #!/bin/bash
+
+          # Récupérer le nom de package Android
+          PACKAGE_NAME=$(grep 'package=' android/app/src/main/AndroidManifest.xml | awk -F'"' '{print $2}')
+          echo "Current package name: $PACKAGE_NAME"
+
+          # Remplacer le nom de package Android
+          if [[ $(uname) == "Darwin" ]]; then
+              sed -i '' "s/$PACKAGE_NAME/$DATA_packageName/g" android/app/src/main/AndroidManifest.xml
+          else
+              sed -i "s/$PACKAGE_NAME/$DATA_packageName/g" android/app/src/main/AndroidManifest.xml
+          fi
+          echo "Package name replaced with $DATA_packageName"
+
+          echo "DEBUG:"
+          grep -C 1 -e "$DATA_packageName" android/app/src/main/AndroidManifest.xml
+          echo ":DEBUGGED"
+
+      - name: Replace Android build name
+        script: |
+          #!/bin/bash
+
+          # Remplacer le nom de build Android dans le fichier build.gradle
+          BUILD_NAME=$(grep 'applicationId' android/app/build.gradle | awk -F'"' '{print $2}')
+          echo "Current build name: $BUILD_NAME"
+
+          # Remplacer le nom de build Android
+          if [[ $(uname) == "Darwin" ]]; then
+              sed -i '' "s/$BUILD_NAME/$DATA_packageName/g" android/app/build.gradle
+          else
+              sed -i "s/$BUILD_NAME/$DATA_packageName/g" android/app/build.gradle
+          fi
+          echo "Build name replaced with $DATA_packageName"
+
+          echo "DEBUG:"
+          grep -C 1 -e "$DATA_packageName" android/app/build.gradle
+          echo ":DEBUGGED"
+
+      - name: Replace Android display name
+        script: |
+          #!/bin/bash
+
+          # Remplacer le nom d'affichage de l'application Android dans le fichier AndroidManifest.xml
+          # appDisplayName == "Izydesk"
+
+          # Récupérer le nom d'affichage de l'application Android
+          APP_DISPLAY_NAME=$(grep 'android:label=' android/app/src/main/AndroidManifest.xml | awk -F'"' '{print $2}')
+          echo "Current app display name: $APP_DISPLAY_NAME"
+
+          # Remplacer le nom d'affichage de l'application Android
+          if [[ $(uname) == "Darwin" ]]; then
+              sed -i '' "s/$APP_DISPLAY_NAME/$DATA_appDisplayName/g" android/app/src/main/AndroidManifest.xml
+          else
+              sed -i "s/$APP_DISPLAY_NAME/$DATA_appDisplayName/g" android/app/src/main/AndroidManifest.xml
+          fi
+          echo "App display name replaced with $DATA_appDisplayName"
+
+
+          echo "DEBUG:"
+          grep -C 1 -e "$DATA_appDisplayName" android/app/src/main/AndroidManifest.xml
+          echo ":DEBUGGED"
+
+      - name: Replace Android MainActivity.kt
+        script: |
+          #!/bin/bash
+
+          source tempenv.sh
+
+          # Change android/app/src/main/kotlin/fr/izydesk/{folderName} to {packageName.split('.')[-1]}
+          lastPackagePart="${DATA_packageName##*.}"
+
+          # Define the target directory
+          target_directory="android/app/src/main/kotlin/fr/izydesk/$lastPackagePart"
+
+          # Check if the directory exists, if not, create it along with any necessary parent directories
+          if [ ! -d "$target_directory" ]; then
+            echo "Directory $target_directory does not exist. Creating it now."
+            mkdir -p "$target_directory"
+            echo "Directory $target_directory created."
+          else
+            echo "Directory $target_directory already exists."
+          fi
+
+          # Define the path to the MainActivity.kt file
+          main_activity_file="$target_directory/MainActivity.kt"
+
+          # Check if MainActivity.kt exists
+          if [ -f "$main_activity_file" ]; then
+            echo "MainActivity.kt found, updating package name."
+
+            # Update the package name in MainActivity.kt
+            sed -i "s/^package .*/package $DATA_packageName;/" "$main_activity_file"
+
+            echo "Package name updated to $DATA_packageName in $main_activity_file"
+          else
+            echo "MainActivity.kt not found in $target_directory. Creating..."
+
+            # Create MainActivity.kt with the specified content
+            fileContent="package $DATA_packageName;\n\nimport io.flutter.embedding.android.FlutterFragmentActivity;\n\npublic class MainActivity extends FlutterFragmentActivity {}\n"
+            echo -e $fileContent > "$main_activity_file"
+
+            echo "MainActivity.kt created in $target_directory"
+          fi
+
+      - *firebase_project_creation
+
+      - *firebase_messaging_setup
+
+      - name: Add Android app to Firebase project
+        script: |
+          #!/bin/bash
+
+          source tempenv.sh
+
+          # Vérifier si l'app Android existe
+          APP_EXISTS=$(firebase apps:list android --project $FIREBASE_PROJECT_NAME | grep -c "$DATA_appDisplayName")
+          if [[ $APP_EXISTS -eq 0 ]]; then
+              APP_EXISTS=$(firebase apps:list android --project $FIREBASE_PROJECT_NAME | grep -c "izy_tertiaire_cma (android)")
+              if [[ $APP_EXISTS -eq 0 ]]; then
+                  # Ajouter une application Android au projet Firebase
+                  RESULT=$(firebase apps:create android "$DATA_appDisplayName" --package-name $DATA_packageName \
+                    --project $FIREBASE_PROJECT_NAME)
+                  SUCCESS=$(echo $RESULT | grep -i -c "Your Firebase ANDROID App is ready!")
+                  if [[ $SUCCESS -ne 1 ]]; then
+                      echo "Error adding Android app to Firebase project: $FIREBASE_PROJECT_NAME"
+                      echo "output: $RESULT"
+                      exit 1
+                  fi
+                  FIREBASE_ANDROID_APP_ID=$(echo $RESULT | awk -F 'App ID: ' '/App ID:/ {print $2}' | awk '{print $1}')
+                  echo "Android app added to Firebase project: $FIREBASE_PROJECT_NAME"
+                  echo "Firebase Android App ID: $FIREBASE_ANDROID_APP_ID"
+                  echo "FIREBASE_ANDROID_APP_ID=$FIREBASE_ANDROID_APP_ID" >> tempenv.sh
+                  exit 0
+              else
+                FIREBASE_DISPLAY_NAME="izy_tertiaire_cma (android)"
+              fi
+          else
+            FIREBASE_DISPLAY_NAME="$DATA_appDisplayName"
+          fi
+
+          # l'app android existe, let's fetch son id
+          FIREBASE_ANDROID_APP_ID=$(firebase apps:list android --project $FIREBASE_PROJECT_NAME | grep "$FIREBASE_DISPLAY_NAME" | grep -o '1:[^ ]*')
+          if [[ -z $FIREBASE_ANDROID_APP_ID ]]; then
+              echo "Error retrieving Android app ID from Firebase project: $FIREBASE_PROJECT_NAME"
+              exit 1
+          fi
+
+          echo "Android app already exists in Firebase project: $FIREBASE_PROJECT_NAME"
+          echo "Firebase Android App ID: $FIREBASE_ANDROID_APP_ID"
+          echo "FIREBASE_ANDROID_APP_ID=$FIREBASE_ANDROID_APP_ID" >> tempenv.sh
+
+      - name: Obtain google-services.json
+        script: |
+          #!/bin/bash
+
+          source tempenv.sh
+
+          # Télécharger le fichier google-services.json
+          OUTPUT=$(firebase apps:sdkconfig android $FIREBASE_ANDROID_APP_ID --project $FIREBASE_PROJECT_NAME > android/app/google-services.json)
+          if [[ $? -ne 0 ]]; then
+              echo "Error downloading google-services.json"
+              echo "output: $OUTPUT"
+              exit 1
+          fi
+
+          echo "DEBUG::"
+          cat android/app/google-services.json
+          echo "::DEBUGGED"
+
+          # Vérifier si le fichier JSON est valide
+          if ! jq empty android/app/google-services.json >/dev/null 2>&1; then
+              echo "google-services.json is malformed."
+              exit 1
+          fi
+
+          echo "google-services.json downloaded and saved to android/app/google-services.json"
+          sed -i.bak '/./,$!d' android/app/google-services.json
+
+      - *enable_flutterfire
+
+      - *generate_firebase_options
+
+      - *generate_env_file
+
+      - *move_images_assets
+
+      - *clean_up
+
+      - *build_launcher_icons
+
+      - *install_flutter_dependencies
+
+      - name: Create a snapshot of the repo
+        script: |
+          mkdir -p $CM_BUILD_DIR/snapshots
+          zip -r $CM_BUILD_DIR/snapshots/repo_snapshot.zip $CM_BUILD_DIR
+
+      - name: Build Android
+        script: |
+          #!/bin/bash
+
+          source tempenv.sh
+
+          flutter build appbundle --release \
+          --build-name=$PUBSPEC_VERSION \
+          --build-number=$PUBSPEC_BUILD_NUMBER \
+          --verbose
+
+    artifacts:
+      - build/**/app-release.aab
+      - $CM_BUILD_DIR/snapshots/repo_snapshot.zip
+      - build/app/outputs/logs/**
+
+    publishing:
+      google_play:
+        credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
+        track: production
+        submit_as_draft: false
+
+  build_ios:
+    name: Triggered iOS Build
+    instance_type: mac_mini_m2
+
+    inputs:
+      bundleIdentifier:
+        description: "Le bundle identifier de l'application"
+
+    environment:
+      groups:
+        - izydesk
+        - izydesk_ios
+
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: "${{ inputs.bundleIdentifier }}"
+
+      xcode: 16.2
+      flutter: 3.27.3
+
+    scripts:
+      - name: Set platform in tempenv
+        script: echo "PLATFORM=ios" >> tempenv.sh
+
+      - name: Apple App Store Version comparaison
+        script: |
+          # AASTORE_VERSION=$()
+          AASTORE_BUILD_NUMBER=$(app-store-connect get-latest-app-store-build-number $DATA_appStoreId)
+          echo "AASTORE_BUILD_NUMBER = $AASTORE_BUILD_NUMBER"
+
+          PUBSPEC_VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d '+' -f 1)
+          PUBSPEC_BUILD_NUMBER=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d '+' -f 2)
+
+          if [[ $PUBSPEC_BUILD_NUMBER == $AASTORE_BUILD_NUMBER ]]; then
+              echo "The version and build number in pubspec.yaml are the same as the latest on Apple App Store."
+              echo "No need to build and release."
+              exit 1
+          elif [[ $PUBSPEC_BUILD_NUMBER < $AASTORE_BUILD_NUMBER ]]; then
+              echo "The build number in pubspec.yaml is less than the latest on Apple App Store."
+              echo "Cannot release an older build. Canceling the process."
+              exit 1
+          fi
+
+          echo "PUBSPEC_VERSION=$PUBSPEC_VERSION" >> tempenv.sh
+          echo "PUBSPEC_BUILD_NUMBER=$PUBSPEC_BUILD_NUMBER" >> tempenv.sh
+
+
+          echo "The build number in pubspec.yaml is greater than the latest on Apple App Store."
+          echo "Proceeding with configuration, build and deployment process."
+
+      - *flutter_doctor
+
+      - *firebase_install
+
+      - *firebase_auth
+
+      - name: Replace iOS bundle identifier
+        script: |
+          #!/bin/bash
+
+          # Remplacer le nom de bundle iOS dans le fichier Info.plist
+          # packageName == fr.izydesk.xxxxx
+
+          # Récupérer le nom de bundle iOS
+          BUNDLE_NAME=$(perl -nle 'print $1 if /PRODUCT_BUNDLE_IDENTIFIER\s*=\s*(.*?);/' "ios/Runner.xcodeproj/project.pbxproj")
+          # echo "Current bundle name: $BUNDLE_NAME"
+
+          # Remplacer le nom de bundle iOS
+          perl -pi.bak -e 's/(PRODUCT_BUNDLE_IDENTIFIER\s*=\s*).*?;/\1"'"$DATA_packageName"'";/g' "ios/Runner.xcodeproj/project.pbxproj"
+          if [[ $? -ne 0 ]]; then
+            echo "Error editing IOS bundle identifier"
+            exit 1
+          fi
+          echo "Bundle name replaced with $DATA_packageName"
+
+
+          echo "DEBUG:"
+          grep -C 1 -e "$DATA_packageName" ios/Runner.xcodeproj/project.pbxproj
+          echo ":DEBUGGED"
+
+      - name: Replace iOS bundle name
+        script: |
+          #!/bin/bash
+
+          # Remplacer le nom d'affichage de l'application iOS dans le fichier Info.plist
+          # appBundleName == "easy_eat"
+
+          # Récupérer le nom d'affichage de l'application iOS
+          if [[ $(uname) == "Darwin" ]]; then
+            APP_DISPLAY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleName" "ios/Runner/Info.plist")
+          else
+            APP_DISPLAY_NAME=$(grep -oP '<key>CFBundleName</key>\s*<string>\K[^<]+' ios/Runner/Info.plist)
+          fi
+
+          echo "Current app display name: $APP_DISPLAY_NAME"
+
+          # Remplacer le nom d'affichage de l'application iOS
+          if [[ $(uname) == "Darwin" ]]; then
+              /usr/libexec/PlistBuddy -c "Set :CFBundleName $IOS_APP_BUNDLE_NAME" "ios/Runner/Info.plist"
+          else
+              sed -i "s/$APP_DISPLAY_NAME/$IOS_APP_BUNDLE_NAME/g" ios/Runner/Info.plist
+          fi
+
+          if [[ $? -ne 0 ]]; then
+            echo "Error editing IOS bundle name"
+            exit 1
+          fi
+          echo "App bundle name replaced with $IOS_APP_BUNDLE_NAME"
+
+          echo "DEBUG:"
+          grep -C 1 -e "$IOS_APP_BUNDLE_NAME" ios/Runner/Info.plist
+          echo ":DEBUGGED"
+
+      - name: Replace iOS display name
+        script: |
+          #!/bin/bash
+
+          # Remplacer le nom d'affichage de l'application iOS dans le fichier Info.plist
+          # appDisplayName == "Izydesk"
+
+          # Récupérer le nom d'affichage de l'application iOS
+          if [[ $(uname) == "Darwin" ]]; then
+            APP_DISPLAY_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "ios/Runner/Info.plist")
+          else
+            APP_DISPLAY_NAME=$(grep -oP '<key>CFBundleDisplayName</key>\s*<string>\K[^<]+' ios/Runner/Info.plist)
+          fi
+
+          # echo "Current app display name: $APP_DISPLAY_NAME"
+
+          # Remplacer le nom d'affichage de l'application iOS
+          if [[ $(uname) == "Darwin" ]]; then
+              /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $DATA_appDisplayName" "ios/Runner/Info.plist"
+          else
+              sed -i "s/$APP_DISPLAY_NAME/$DATA_appDisplayName/g" ios/Runner/Info.plist
+          fi
+
+          if [[ $? -ne 0 ]]; then
+            echo "Error editing IOS bundle display name"
+            exit 1
+          fi
+          echo "App display name replaced with $DATA_appDisplayName"
+
+          echo "DEBUG:"
+          grep -C 1 -e "$DATA_appDisplayName" ios/Runner/Info.plist
+          echo ":DEBUGGED"
+
+      - *firebase_project_creation
+
+      - *firebase_messaging_setup
+
+      - name: Add iOS app to Firebase project
+        script: |
+          #!/bin/bash
+
+          source tempenv.sh
+
+          # Vérifier si l'app iOS existe
+          APP_EXISTS=$(firebase apps:list ios --project $FIREBASE_PROJECT_NAME | grep -c "$DATA_appDisplayName")
+          if [[ $APP_EXISTS -eq 0 ]]; then
+            APP_EXISTS=$(firebase apps:list ios --project $FIREBASE_PROJECT_NAME | grep -c "izy_customer_mobile_app")
+            if [[ $APP_EXISTS -eq 0 ]]; then
+              # Ajouter une application iOS au projet Firebase
+              RESULT=$(firebase apps:create ios "$DATA_appDisplayName" --bundle-id $DATA_packageName --app-store-id $DATA_appStoreId \
+                --project $FIREBASE_PROJECT_NAME)
+              SUCCESS=$(echo $RESULT | grep -i -c "Your Firebase IOS App is ready!")
+              if [[ $SUCCESS -ne 1 ]]; then
+                  echo "Error adding iOS app to Firebase project: $FIREBASE_PROJECT_NAME"
+                  echo "output: $RESULT"
+                  exit 1
+              fi
+              FIREBASE_IOS_APP_ID=$(echo $RESULT | awk -F 'App ID: ' '/App ID:/ {print $2}' | awk '{print $1}')
+              echo "iOS app added to Firebase project: $FIREBASE_PROJECT_NAME"
+              echo "Firebase iOS App ID: $FIREBASE_IOS_APP_ID"
+            fi
+          else
+              FIREBASE_IOS_APP_ID=$(firebase apps:list ios --project $FIREBASE_PROJECT_NAME | grep "$DATA_appDisplayName" | grep -o '1:[^ ]*')
+              if [[ -z $FIREBASE_IOS_APP_ID ]]; then
+                  echo "Error retrieving iOS app ID from Firebase project: $FIREBASE_PROJECT_NAME"
+                  exit 1
+              fi
+
+              echo "iOS app already exists in Firebase project: $FIREBASE_PROJECT_NAME"
+              echo "Firebase iOS App ID: $FIREBASE_IOS_APP_ID"
+          fi
+
+          echo "FIREBASE_IOS_APP_ID=$FIREBASE_IOS_APP_ID" >> tempenv.sh
+
+      - name: Obtain GoogleService-Info.plist
+        script: |
+          #!/bin/bash
+
+          source tempenv.sh
+
+          # Télécharger le fichier GoogleService-Info.plist
+          OUTPUT=$(firebase apps:sdkconfig ios $FIREBASE_IOS_APP_ID --project $FIREBASE_PROJECT_NAME > ios/Runner/GoogleService-Info.plist)
+          if [[ $? -ne 0 ]]; then
+              echo "Error downloading GoogleService-Info.plist"
+              echo "output: $OUTPUT"
+              exit 1
+          fi
+          echo "GoogleService-Info.plist downloaded and saved to ios/Runner/GoogleService-Info.plist"
+
+          # Retire les potentielles lignes vides au début du fichier
+          sed -i.bak '/./,$!d' ios/Runner/GoogleService-Info.plist
+
+          echo "ios/Runner/GoogleService-Info.plist fileContent"
+          echo "---"
+          echo "$(<ios/Runner/GoogleService-Info.plist)"
+          echo "---"
+
+      - *enable_flutterfire
+
+      - *generate_firebase_options
+
+      - *generate_env_file
+
+      - *move_images_assets
+
+      - *clean_up
+
+      - *build_launcher_icons
+
+      - *install_flutter_dependencies
+
+      - name: Set up keychain to be used for code signing using Codemagic CLI 'keychain' command
+        script: keychain initialize
+
+      - name: Fetch signing files
+        script: |
+          #!/bin/bash
+
+          app-store-connect fetch-signing-files "$DATA_packageName" \
+            --type IOS_APP_STORE \
+            --create
+
+          echo "Save provisioning profile name"
+
+          # Liste des fichiers .mobileprovision
+          PROVISIONING_PROFILE_PATHS=$(find "/Users/builder/Library/MobileDevice/Provisioning Profiles/" -name "*.mobileprovision" -print0)
+          if [ -z "$PROVISIONING_PROFILE_PATHS" ]; then
+              echo "Aucun fichier .mobileprovision trouvé."
+              exit 1
+          fi
+
+          echo "PPP: $PROVISIONING_PROFILE_PATHS"
+
+          # Initialisation de la variable pour stocker le nom du profil de provisionnement
+          PROVISIONING_PROFILE_NAME=""
+
+          # Itérer sur les fichiers .mobileprovision
+          while IFS= read -r -d '' PROFILE_PATH; do
+              echo "Vérification du fichier : $PROFILE_PATH"
+
+              # crée un temporaire
+              TMP_PLIST=$(mktemp)    # crée /var/folders/.../tmp.XXXXXX
+              TMP_PLIST="${TMP_PLIST}.plist"
+              
+              # décode le .mobileprovision en XML
+              security cms -D -i "$PROFILE_PATH" > "$TMP_PLIST" 2>/dev/null
+              if [ $? -ne 0 ]; then
+              echo "Erreur de décodage du profil $PROFILE_PATH"
+              rm -f "$TMP_PLIST"
+              continue
+              fi
+              
+              # récupère ensuite le Name
+              CURRENT_PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" "$TMP_PLIST")
+
+              if [ -z "$CURRENT_PROFILE_NAME" ]; then
+                  echo "Aucun nom de profil de provisionnement trouvé dans le fichier $PROFILE_PATH."
+                  continue
+              fi
+
+              # Convertir le nom du profil en minuscules pour comparaison insensible à la casse
+              CURRENT_PROFILE_NAME_LOWER=$(echo "$CURRENT_PROFILE_NAME" | tr '[:upper:]' '[:lower:]')
+              SEARCH_TERM="wildcard"
+              SEARCH_TERM_LOWER=$(echo "$SEARCH_TERM" | tr '[:upper:]' '[:lower:]')
+
+              APP_NAME="$DATA_saasCompanyName ios_app_store"
+              APP_NAME_LOWER=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]')
+
+              echo "PPN actuel: $CURRENT_PROFILE_NAME"
+
+              # Vérifiez si le nom du profil ne contient pas le mot "wildcard" (insensible à la casse)
+              if [[ "$CURRENT_PROFILE_NAME_LOWER" != *"$SEARCH_TERM_LOWER"* ]]; then
+                  # Vérifiez si le nom du profil contient bien le bon nom de package (exact)
+                  if [[ "$CURRENT_PROFILE_NAME_LOWER" == *"$APP_NAME_LOWER"* ]]; then
+                      PROVISIONING_PROFILE_NAME="$CURRENT_PROFILE_NAME"
+                      PROVISIONING_PROFILE_PATH="$PROFILE_PATH"
+                      echo "Profil trouvé sans 'wildcard', et avec le bon nom d'app '$APP_NAME': $PROVISIONING_PROFILE_NAME"
+                      break
+                  else
+                      echo "Le profil $CURRENT_PROFILE_NAME ne correspond pas au bon nom d'app ($APP_NAME), vérification du prochain profil..."
+                  fi
+              else
+                  echo "Le profil $CURRENT_PROFILE_NAME contient 'wildcard', vérification du prochain profil..."
+              fi
+          done < <(find "/Users/builder/Library/MobileDevice/Provisioning Profiles/" -name "*.mobileprovision" -print0)
+
+          if [ -z "$PROVISIONING_PROFILE_NAME" ]; then
+              echo "Aucun profil de provisionnement sans 'wildcard' trouvé. (name)"
+              exit 1
+          fi
+          if [ -z "$PROVISIONING_PROFILE_PATH" ]; then
+              echo "Aucun profil de provisionnement sans 'wildcard' trouvé. (path)"
+              exit 1
+          fi
+
+          echo "PROVISIONING_PROFILE_NAME=\"$PROVISIONING_PROFILE_NAME\"" >> tempenv.sh
+          echo "PROVISIONING_PROFILE_PATH=\"$PROVISIONING_PROFILE_PATH\"" >> tempenv.sh
+
+      - name: Set up signing certificate
+        script: keychain add-certificates
+
+      - name: Set up code signing settings on Xcode project
+        script: |
+          #!/bin/bash
+
+          source tempenv.sh
+
+          xcode-project use-profiles
+          # --profile $PROVISIONING_PROFILE_PATH
+
+      - name: Pod update
+        script: |
+          #!/bin/bash
+
+          source tempenv.sh
+
+          pod repo update
+          if [[ $? -ne 0 ]]; then
+              echo "Error updating CocoaPods repository"
+              exit 1
+          fi
+
+          cd ios
+          if [[ $? -ne 0 ]]; then
+              echo "Error changing directory to ios"
+              exit 1
+          fi
+
+          pod update
+          if [[ $? -ne 0 ]]; then
+              echo "Error updating CocoaPods dependencies"
+              exit 1
+          fi
+
+          cd ..
+          if [[ $? -ne 0 ]]; then
+              echo "Error changing directory back to project root"
+              exit 1
+          fi
+
+      #- name: XCode Build
+      #  script: |
+      #    xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner -configuration Release -archivePath $CM_BUILD_DIR/Runner.xcarchive archive
+
+      - name: Generate exportOptions file
+        script: |
+          #!/bin/bash
+
+          source tempenv.sh
+          echo "PPN SOURCED: $PROVISIONING_PROFILE_NAME"
+
+          # Échappe les caractères XML spéciaux dans le nom du provisioning profile
+          escaped_provisioning_profile_name=$(printf '%s' "$PROVISIONING_PROFILE_NAME" \
+          | sed -e 's/&/\&amp;/g' \
+          -e 's/</\&lt;/g' \
+          -e 's/>/\&gt;/g' \
+          -e "s/'/\&apos;/g" \
+          -e 's/\"/\&quot;/g')
+
+          cat > exportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>$APP_STORE_CONNECt_DEPLOY_METHOD</string>
+              <key>teamID</key>
+              <string>$APP_STORE_CONNECT_TEAM_ID</string>
+              <key>uploadBitcode</key>
+              <false/>
+              <key>compileBitcode</key>
+              <true/>
+              <key>uploadSymbols</key>
+              <true/>
+              <key>provisioningProfiles</key>
+              <dict>
+                  <key>$DATA_packageName</key>
+                  <string>$escaped_provisioning_profile_name</string>
+              </dict>
+          </dict>
+          </plist>
+          EOF
+          if [[ $? -ne 0 ]]; then
+              echo "Error creating exportOptions.plist"
+              exit 1
+          fi
+
+          # Retire les potentielles lignes vides
+          sed -i.bak '/./,$!d' exportOptions.plist
+
+          # 
+          echo "ORIGINAL EXPROT OPTIONS PLIST"
+          cat /Users/builder/export_options.plist
+          echo "OK?"
+
+          cp exportOptions.plist /Users/builder/export_options.plist
+
+          echo "OUR EXPORT OPTIONS PLIST"
+          cat exportOptions.plist
+          echo "OK?"
+
+      #- name: XCode IPA Export
+      #  script: |
+      #    #!/bin/bash
+
+      #    xcodebuild -exportArchive -archivePath $CM_BUILD_DIR/Runner.xcarchive -exportOptionsPlist exportOptions.plist -exportPath $CM_BUILD_DIR
+      #    if [[ $? -ne 0 ]]; then
+      #        echo "Error exporting IPA"
+      #        exit 1
+      #    fi
+
+      - name: Create a snapshot of the repo
+        script: |
+          mkdir -p $CM_BUILD_DIR/snapshots
+          zip -r $CM_BUILD_DIR/snapshots/repo_snapshot.zip $CM_BUILD_DIR
+
+      - name: Flutter build ios
+        script: flutter build ios --release
+
+      - name: Flutter build IPA
+        script: flutter build ipa --release --export-options-plist=exportOptions.plist
+
+    artifacts:
+      - $CM_BUILD_DIR/**/*.ipa
+      - build/**/*.ipa
+      - $CM_BUILD_DIR/snapshots/repo_snapshot.zip
+
+    integrations:
+      app_store_connect: CodeMagicAPIKey
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_app_store: true
+        release_type: AFTER_APPROVAL
+
+  trigger_build:
+    name: Trigger App Build
+    instance_type: linux_x2
+
+    environment:
+      groups:
+        - izydesk
+
+    inputs:
+      applicationIdentifier:
+        description: "L'identifiant de l'application (fr.izydesk.xxxxx)"
+
+      buildAndroid:
+        default: true
+        type: boolean
+        description: "Build Android?"
+
+      buildIOS:
+        default: true
+        type: boolean
+        description: "Build iOS ?"
+
+    scripts:
+      - name: Read izydesk_apps.json and build Android
+        when:
+          condition: ${{ inputs.buildAndroid }}
+        script: |
+          #!/bin/bash
+
+          # Lire le fichier JSON et extraire la liste des applications
+          APPS=$(jq -c '.apps[]' izydesk_apps.json)
+
+          if [[ $? -ne 0 ]]; then
+              echo "Error reading JSON from izydesk_apps.json"
+              exit 1
+          fi
+
+          # Compter le nombre d'applications
+          APP_COUNT=$(echo "$APPS" | wc -l)
+          echo "Found $APP_COUNT apps in configuration."
+
+          # Trouver l'application avec l'identifiant donné
+          app=$(echo "$APPS" | jq -c "select(.packageName == \"${{ inputs.applicationIdentifier }}\")")
+
+          # Vérifier si l'application a été trouvée
+          if [[ -z "$app" ]]; then
+              echo "Application with identifier ${{ inputs.applicationIdentifier }} not found in configuration."
+              exit 1
+          fi
+
+          echo "Found app configuration: $app"
+
+
+          saasCompanyName=$(echo "$app" | jq -r '.saasCompanyName')
+          saasCompanyUuid=$(echo "$app" | jq -r '.saasCompanyUuid')
+          saasCompanyType=$(echo "$app" | jq -r '.saasCompanyType')
+          packageNameAndroid=$(echo "$app" | jq -r '.packageName')
+          packageNameIos=$(echo "$app" | jq -r '.packageName')
+          appDisplayName=$(echo "$app" | jq -r '.appDisplayName')
+          appStoreId=$(echo "$app" | jq -r '.appStoreAppId')
+
+          # Vérification si la clé "overrideIosPackageName" est présente et non nulle
+          overrideIosPackageName=$(echo "$app" | jq -r '.overrideIosPackageName // empty')
+          if [ -n "$overrideIosPackageName" ]; then
+              packageNameIos="$overrideIosPackageName"
+          fi
+
+          #~ Check that all required fields are present
+          if [[ -z "$saasCompanyName" || -z "$saasCompanyUuid" || -z "$saasCompanyType" || -z "$packageNameAndroid" || -z "$appDisplayName" ]]; then
+            echo "Missing required fields for app $app"
+            exit 1
+          fi
+
+          echo "Triggering ANDROID build for $saasCompanyName..."
+
+          # Déclencher le workflow Android
+          curl -X POST "https://api.codemagic.io/builds" \
+          -H "Content-Type: application/json" \
+          -H "x-auth-token: $CM_API_TOKEN" \
+          -d '{
+            "appId": "'"$COD_MAGIC_APP_ID"'",
+            "workflowId": "build_android",
+            "branch": "main",
+            "environment": {
+              "variables": {
+                "DATA_saasCompanyName": "'"$saasCompanyName"'",
+                "DATA_saasCompanyUuid": "'"$saasCompanyUuid"'",
+                "DATA_saasCompanyType": "'"$saasCompanyType"'",
+                "DATA_packageName": "'"$packageNameAndroid"'",
+                "DATA_appDisplayName": "'"$appDisplayName"'"
+              }
+            }
+          }'
+
+      - name: Read izydesk_apps.json and build IOS
+        when:
+          condition: ${{ inputs.buildIOS }}
+        script: |
+          #!/bin/bash
+
+          # Lire le fichier JSON et extraire la liste des applications
+          APPS=$(jq -c '.apps[]' izydesk_apps.json)
+
+          if [[ $? -ne 0 ]]; then
+              echo "Error reading JSON from izydesk_apps.json"
+              exit 1
+          fi
+
+          # Compter le nombre d'applications
+          APP_COUNT=$(echo "$APPS" | wc -l)
+          echo "Found $APP_COUNT apps in configuration."
+
+          # Trouver l'application avec l'identifiant donné
+          app=$(echo "$APPS" | jq -c "select(.packageName == \"${{ inputs.applicationIdentifier }}\")")
+
+          # Vérifier si l'application a été trouvée
+          if [[ -z "$app" ]]; then
+              echo "Application with identifier ${{ inputs.applicationIdentifier }} not found in configuration."
+              exit 1
+          fi
+
+          echo "Found app configuration: $app"
+
+
+          saasCompanyName=$(echo "$app" | jq -r '.saasCompanyName')
+          saasCompanyUuid=$(echo "$app" | jq -r '.saasCompanyUuid')
+          saasCompanyType=$(echo "$app" | jq -r '.saasCompanyType')
+          packageNameAndroid=$(echo "$app" | jq -r '.packageName')
+          packageNameIos=$(echo "$app" | jq -r '.packageName')
+          appDisplayName=$(echo "$app" | jq -r '.appDisplayName')
+          appStoreId=$(echo "$app" | jq -r '.appStoreAppId')
+
+          # Vérification si la clé "overrideIosPackageName" est présente et non nulle
+          overrideIosPackageName=$(echo "$app" | jq -r '.overrideIosPackageName // empty')
+          if [ -n "$overrideIosPackageName" ]; then
+              packageNameIos="$overrideIosPackageName"
+          fi
+
+          #~ Check that all required fields are present
+          if [[ -z "$saasCompanyName" || -z "$saasCompanyUuid" || -z "$saasCompanyType" || -z "$packageNameIos" || -z "$appStoreId" || -z "$appDisplayName" ]]; then
+            echo "Missing required fields for app $app"
+            exit 1
+          fi
+
+          echo "Triggering iOS build for $saasCompanyName..."
+
+          # Déclencher le workflow iOS
+          curl --fail --show-error -X POST "https://api.codemagic.io/builds" \
+          -H "Content-Type: application/json" \
+          -H "x-auth-token: $CM_API_TOKEN" \
+          -d '{
+            "appId": "'"$COD_MAGIC_APP_ID"'",
+            "workflowId": "build_ios",
+            "branch": "main",
+            "inputs": {
+              "bundleIdentifier": "'"$packageNameIos"'"
+            },
+            "environment": {
+              "variables": {
+                "DATA_saasCompanyName": "'"$saasCompanyName"'",
+                "DATA_saasCompanyUuid": "'"$saasCompanyUuid"'",
+                "DATA_saasCompanyType": "'"$saasCompanyType"'",
+                "DATA_packageName": "'"$packageNameIos"'",
+                "DATA_appDisplayName": "'"$appDisplayName"'",
+                "DATA_appStoreId": "'"$appStoreId"'"
+              }
+            }
+          }'

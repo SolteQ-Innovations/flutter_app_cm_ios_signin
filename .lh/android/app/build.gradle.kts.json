@@ -1,0 +1,18 @@
+{
+    "sourceFile": "android/app/build.gradle.kts",
+    "activeCommit": 0,
+    "commits": [
+        {
+            "activePatchIndex": 0,
+            "patches": [
+                {
+                    "date": 1748929145200,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n"
+                }
+            ],
+            "date": 1748929145200,
+            "name": "Commit-0",
+            "content": "plugins {\n    id(\"com.android.application\")\n    id(\"kotlin-android\")\n    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.\n    id(\"dev.flutter.flutter-gradle-plugin\")\n}\n\nandroid {\n    namespace = \"com.flutter_app_cm_ios_signin.app\"\n    compileSdk = flutter.compileSdkVersion\n    ndkVersion = flutter.ndkVersion\n\n    compileOptions {\n        sourceCompatibility = JavaVersion.VERSION_11\n        targetCompatibility = JavaVersion.VERSION_11\n    }\n\n    kotlinOptions {\n        jvmTarget = JavaVersion.VERSION_11.toString()\n    }\n\n    defaultConfig {\n        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).\n        applicationId = \"com.flutter_app_cm_ios_signin.app\"\n        // You can update the following values to match your application needs.\n        // For more information, see: https://flutter.dev/to/review-gradle-config.\n        minSdk = flutter.minSdkVersion\n        targetSdk = flutter.targetSdkVersion\n        versionCode = flutter.versionCode\n        versionName = flutter.versionName\n    }\n\n    buildTypes {\n        release {\n            // TODO: Add your own signing config for the release build.\n            // Signing with the debug keys for now, so `flutter run --release` works.\n            signingConfig = signingConfigs.getByName(\"debug\")\n        }\n    }\n}\n\nflutter {\n    source = \"../..\"\n}\n"
+        }
+    ]
+}

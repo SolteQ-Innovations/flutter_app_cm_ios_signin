@@ -1,0 +1,18 @@
+{
+    "sourceFile": "android/app/src/main/kotlin/com/example/flutter_app_cm_ios_signin/MainActivity.kt",
+    "activeCommit": 0,
+    "commits": [
+        {
+            "activePatchIndex": 0,
+            "patches": [
+                {
+                    "date": 1748929145208,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n"
+                }
+            ],
+            "date": 1748929145208,
+            "name": "Commit-0",
+            "content": "package com.flutter_app_cm_ios_signin.app\n\nimport io.flutter.embedding.android.FlutterActivity\n\nclass MainActivity : FlutterActivity()\n"
+        }
+    ]
+}

@@ -1,8 +1,23 @@
+definitions:
+  environment:
+    groups:
+      - appstore_credentials
+
 workflows:
   ios-workflow:
     name: iOS Workflow
     instance_type: mac_mini_m2
     max_build_duration: 120
+    triggering:
+      events:
+        - tag
+      branch_patterns:
+        - pattern: "main"
+          include: true
+      tag_patterns:
+        - pattern: "*"
+          include: true
+      cancel_previous_builds: false
     environment:
       flutter: stable
       xcode: latest
@@ -11,7 +26,7 @@ workflows:
         - appstore_credentials
       ios_signing:
         distribution_type: app_store
-        bundle_identifier: com.solo.flutterCodemagicApp
+        bundle_identifier: com.flutter_app_cm_ios_signin.app
     integrations:
       app_store_connect: SolomonAPIKey
     scripts:

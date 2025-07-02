@@ -1,4 +1,4 @@
-package com.example.flutter_app_cm_ios_signin
+package com.flutter_app_cm_ios_signin.app
 
 import io.flutter.embedding.android.FlutterActivity
 
