@@ -26,7 +26,7 @@ workflows:
         - appstore_credentials
       ios_signing:
         distribution_type: app_store
-        bundle_identifier:  com.flutter_app_cm_ios_signin.app
+        bundle_identifier:  com.flutterAppCmIosSignin.app
     inputs:
       name: # input ID
         description: This is the first input?
